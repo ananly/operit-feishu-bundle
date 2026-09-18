@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "toolpkg_id": "com.operit.feishu_bundle",
+  "version": "0.1.0",
+  "main": "dist/main.js",
+  "display_name": {
+    "zh": "飞书机器人工具包",
+    "en": "Feishu Bot Bundle"
+  },
+  "description": {
+    "zh": "将飞书自建应用的双向对话机器人能力（WebSocket 长连接收消息、消息队列读取、C2C/群消息发送、模型 API 配置切换）整理成 Operit 工具。",
+    "en": "Expose Feishu custom app bot capabilities (WebSocket receive, queued events, C2C/group messaging, model API config switching) as Operit tools."
+  },
+  "enabled_by_default": true,
+  "subpackages": [
+    {
+      "id": "feishu_bot",
+      "entry": "dist/packages/feishu_bot.js"
+    }
+  ],
+  "resources": [
+    {
+      "key": "feishu_gateway_service_py",
+      "path": "resources/feishu_gateway_service.py",
+      "mime": "text/x-python"
+    }
+  ]
+}
