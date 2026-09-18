@@ -128,6 +128,40 @@ if (hit && hit.apiKey) {
 
 ---
 
+## 🐛 已知问题（Known Issues）
+
+> 以下为实测中观察到的平台侧/工具调用层行为，**不影响功能使用**，但需按规避方式操作。
+
+### 1. 部分工具调用返回空 `<error>`（`Step error`）🟡
+
+**现象**：以下调用偶发返回空白错误，无有效信息：
+
+- `feishu_bot_service_stop` —— 无参数工具易触发
+- `feishu_bot_configure` 传入含 `uuid` 格式的 `model_config_id` 时
+- 传入超长参数值时
+- `feishu_bot_configure` 携带 `test_connection: true` 时
+
+**推测原因**：平台工具调用层对**无参调用 / uuid 参数 / 超长值**存在 schema 过滤或校验限制，具体规则未公开。
+
+**规避方式**：
+
+| 场景 | 规避 |
+|---|---|
+| 需要停服务 | 改用 `feishu_bot_service_start(restart: true)` 一步完成停+启 |
+| 切模型（含 uuid id） | **分步调用**：先只传 `model_config_id` + `model_name`，避免一次传三个字段 |
+| 想测连接 | 去掉 `test_connection`，改用 `feishu_bot_test_connection` 单独测 |
+| 仍失败 | 简化参数（减少字段数）后重试，通常可绕过 |
+
+### 2. `feishu_bot_service_stop` 可能"停不掉" 🟡
+
+**现象**：调用 stop 后服务很快又被拉起。
+
+**原因**：包内守护逻辑 `ensureFeishuServiceStarted` 会在检测到服务停止时自动重启；此外网关进程运行在 proot 容器内，**宿主侧 `ps`/`kill` 看不到其真实 PID**，无法从外部强杀。
+
+**规避方式**：不要依赖 stop，直接用 `feishu_bot_service_start(restart: true)` 显式重启。
+
+---
+
 ## 📁 项目结构
 
 ```
