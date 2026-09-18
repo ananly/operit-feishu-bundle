@@ -1,7 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.requestJson = exports.fetchCompat = exports.createControlToken = exports.shellQuote = exports.parseJsonObject = exports.maskSecret = exports.parsePositiveInt = exports.toBoolean = exports.parseOptionalBoolean = exports.safeErrorMessage = exports.firstNonBlank = exports.isObject = exports.hasOwn = exports.asText = exports.FeishuReceiveIdType = exports.FeishuMessageType = exports.FeishuEventType = exports.MessageType = exports.TERMINAL_SERVICE_OUTPUT_FILE_NAME = exports.TERMINAL_SERVICE_RESOURCE_KEY = exports.MAX_RECEIVE_LIMIT = exports.DEFAULT_RECEIVE_LIMIT = exports.DEFAULT_SERVICE_WAIT_MS = exports.LOCAL_SERVICE_PORT = exports.DEFAULT_WS_CONFIG = exports.ENV_KEYS = exports.DEFAULT_MODEL_CONFIG = exports.SANDBOX_FEISHU_OPEN_BASE_URL = exports.FEISHU_OPEN_BASE_URL = exports.LOG_FILE_NAME = exports.CONFIG_FILE_NAME = exports.FEISHU_TOOLPKG_ID = exports.PACKAGE_VERSION = void 0;
-exports.PACKAGE_VERSION = "0.1.0";
+exports.PACKAGE_VERSION = "0.1.1";
 exports.FEISHU_TOOLPKG_ID = "com.operit.feishu_bundle";
 exports.CONFIG_FILE_NAME = "feishu_config.json";
 exports.LOG_FILE_NAME = "feishu_service.log";

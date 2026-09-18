@@ -210,6 +210,11 @@ class GatewayState:
         self.processed_event_ids = {}
         self.processed_event_order = []
         self.max_processed_events = 500
+        # 【去重表持久化】进程重启后仍能拦截历史重投事件。
+        # 存放于脚本同目录，缺失/损坏时静默忽略。
+        self.dedup_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "feishu_gateway.dedup.json")
+        self._load_dedup()
 
         # 模型配置
         self.model_api_key = model_cfg.get("model_api_key", "")
@@ -231,7 +236,42 @@ class GatewayState:
             while len(self.processed_event_order) > self.max_processed_events:
                 old_key = self.processed_event_order.pop(0)
                 self.processed_event_ids.pop(old_key, None)
+            # 【去重表持久化】新增 key 后立即落盘（频率极低，无性能压力）
+            self._save_dedup()
             return True
+
+    def _load_dedup(self):
+        """启动时从磁盘载入去重表；文件缺失/损坏一律静默忽略。"""
+        try:
+            with open(self.dedup_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                order = data.get("order", [])
+                ids = data.get("ids", {})
+                if isinstance(order, list) and isinstance(ids, dict):
+                    self.processed_event_order = [k for k in order if k in ids]
+                    self.processed_event_ids = dict(ids)
+                    log.info("[Dedup] 已从磁盘载入 %d 条历史去重记录",
+                             len(self.processed_event_ids))
+        except FileNotFoundError:
+            log.debug("[Dedup] 无历史去重文件，跳过载入")
+        except Exception as e:
+            log.warning("[Dedup] 载入去重表失败(忽略): %s", e)
+
+    def _save_dedup(self):
+        """把去重表原子写入磁盘；任何异常均静默忽略，不影响主流程。
+        调用方已持有 self.lock，此处不再重复加锁。"""
+        try:
+            payload = {
+                "ids": self.processed_event_ids,
+                "order": self.processed_event_order,
+            }
+            tmp = self.dedup_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, self.dedup_path)
+        except Exception as e:
+            log.warning("[Dedup] 写入去重表失败(忽略): %s", e)
 
     def set_ws(self, ws):
         with self.lock:
@@ -304,8 +344,9 @@ class GatewayState:
 
 # ─── 日志辅助 ─────────────────────────────────────────────────────────────────
 
-def setup_logging(log_file=None):
-    log.setLevel(logging.DEBUG)
+def setup_logging(log_file=None, level=None):
+    _lvl_name = (level or os.environ.get("FEISHU_LOG_LEVEL") or "INFO").upper()
+    log.setLevel(getattr(logging, _lvl_name, logging.INFO))
     formatter = logging.Formatter(
         "[%(asctime)s] %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
@@ -642,6 +683,11 @@ def send_frame(state, headers, payload=b"", method=1, seq_id=0, log_id=0, servic
             ws.send(data, opcode=websocket.ABNF.OPCODE_BINARY)
         except Exception as e:
             log.error("WS 发送失败: %s", e)
+    else:
+        # 【可观测性】ws 为 None 时此前是静默丢弃，ACK 丢失将直接导致飞书重投。
+        # 这里显式告警，避免"ACK 没发出去却以为发了"。
+        log.warning("send_frame: ws 未连接，帧被丢弃 method=%s seq_id=%s headers=%s",
+                    method, seq_id, headers)
 
 def send_ping(state):
     """发送 ping 控制帧（method=0 CONTROL, type=ping）。"""
@@ -759,7 +805,7 @@ def handle_event_data(state, payload):
         log.error("模型调用失败")
 
 
-def _process_event_async(state, payload, msg_id, t0):
+def _process_event_async(state, payload, msg_id, t0, seq_id=0, log_id=0):
     """后台线程：处理事件（可能调用慢模型），完成后补发带真实 biz_rt 的 ACK。
 
     拆到独立线程是为了让 WS 收帧回调尽快返回——首帧 ACK 已在回调里
@@ -776,8 +822,10 @@ def _process_event_async(state, payload, msg_id, t0):
             {"key": "message_id", "value": msg_id},
             {"key": "biz_rt", "value": str(biz_rt)},
         ]
-        send_frame(state, done_headers, b'{"code": 200}')
-        log.info("[ACK-DIAG] 已发送完成 ACK biz_rt=%d message_id=%r", biz_rt, msg_id)
+        # 【关键修复】ACK 必须回填请求帧的 SeqID，否则飞书判定事件未确认→持续重投
+        send_frame(state, done_headers, b'{"code": 200}', seq_id=seq_id, log_id=log_id)
+        log.info("[ACK-DIAG] 已发送完成 ACK biz_rt=%d message_id=%r seq_id=%s",
+                 biz_rt, msg_id, seq_id)
 
 
 # ─── WS 回调 ──────────────────────────────────────────────────────────────────
@@ -818,9 +866,9 @@ def on_ws_message(ws, message):
             # [诊断] 打印事件帧完整 header，确认 message_id 是否可取到
             try:
                 hdr_dump = {h["key"]: h["value"] for h in headers}
-                log.info("[ACK-DIAG] event frame headers=%s frame.SeqID=%s frame.LogID=%s",
-                         json.dumps(hdr_dump, ensure_ascii=False),
-                         frame.get("SeqID"), frame.get("LogID"))
+                log.debug("[ACK-DIAG] event frame headers=%s frame.SeqID=%s frame.LogID=%s",
+                          json.dumps(hdr_dump, ensure_ascii=False),
+                          frame.get("SeqID"), frame.get("LogID"))
             except Exception as _e:
                 log.warning("[ACK-DIAG] dump headers 失败: %s", _e)
             # 【重投消除】首帧 ACK 的 biz_rt 不能为 0——实测飞书对
@@ -832,8 +880,15 @@ def on_ws_message(ws, message):
                 {"key": "message_id", "value": msg_id},
                 {"key": "biz_rt", "value": "1"},
             ]
-            send_frame(state, ack_headers, b'{"code": 200}')
-            log.info("[ACK-DIAG] 已发送首次 ACK (biz_rt=1) message_id=%r", msg_id)
+            # 【关键修复】ACK 帧回填请求帧的 SeqID / LogID。
+            # 飞书长连接协议要求 ACK 与请求帧的 SeqID 一一对应；
+            # 此前的 SeqID=0 会让 ACK 匹配不上在途请求，飞书持续重投同一事件。
+            _req_seq = frame.get("SeqID", 0) or 0
+            _req_log = frame.get("LogID", 0) or 0
+            send_frame(state, ack_headers, b'{"code": 200}',
+                       seq_id=_req_seq, log_id=_req_log)
+            log.info("[ACK-DIAG] 已发送首次 ACK (biz_rt=1) message_id=%r seq_id=%s log_id=%s",
+                     msg_id, _req_seq, _req_log)
             # 【异步解耦】立即返回，不阻塞 WS 收帧线程。
             # 模型调用（可能 10+ 秒）放到后台线程执行，完成后补发带真实
             # biz_rt 的 ACK。这样首帧 ACK 能在毫秒级送出，
@@ -841,7 +896,7 @@ def on_ws_message(ws, message):
             _t0 = time.time()
             threading.Thread(
                 target=_process_event_async,
-                args=(state, payload, msg_id, _t0),
+                args=(state, payload, msg_id, _t0, _req_seq, _req_log),
                 daemon=True,
             ).start()
         else:
@@ -1038,13 +1093,14 @@ def parse_args(argv=None):
     parser.add_argument("--model-endpoint", default=DEFAULT_MODEL_CONFIG["model_endpoint"], help="模型 API 端点")
     parser.add_argument("--model-name", default=DEFAULT_MODEL_CONFIG["model_name"], help="模型名称")
     parser.add_argument("--log-file", default=None, help="日志文件路径")
+    parser.add_argument("--log-level", default=None, help="日志级别（默认取环境变量 FEISHU_LOG_LEVEL，缺省 INFO）")
     return parser.parse_args(argv)
 
 
 def main():
     """主入口。"""
     args = parse_args()
-    setup_logging(args.log_file)
+    setup_logging(args.log_file, args.log_level)
     _kill_stale_instances()
 
     # 【稳定性修复·DNS 抖动】在建立任何网络连接之前安装 DNS 兜底。

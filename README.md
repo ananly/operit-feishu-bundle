@@ -3,7 +3,7 @@
 > Operit ToolPkg：把飞书自建应用的双向对话机器人能力，整理成 Operit 可调用的工具。
 > 支持 WebSocket 长连接收消息、消息队列读取、C2C/群消息发送、多模型 API 配置切换。
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue)](./manifest.json)
+[![Version](https://img.shields.io/badge/version-0.1.1-blue)](./manifest.json)
 [![Platform](https://img.shields.io/badge/platform-Operit-green)](https://github.com/ananly)
 [![License](https://img.shields.io/badge/license-MIT-yellow)](./LICENSE)
 
@@ -24,7 +24,8 @@
 
 **内置能力：**
 - 🔌 **异步解耦**：首帧 ACK 立即回（`biz_rt=1`），模型生成后异步发送 + 完成 ACK，规避飞书 ~19s 重投窗口
-- 🔁 **消息去重**：服务端固定重投策略下，`[Dedup]` 兜底保证只回复一次
+- 🔁 **消息去重（可持久化）**：服务端固定重投策略下，`[Dedup]` 兜底保证只回复一次；去重表落盘至 `feishu_gateway.dedup.json`，**进程重启后仍能拦截历史重投**
+- 🔇 **日志级别可控**：默认 `INFO`，可用 `--log-level` 参数或 `FEISHU_LOG_LEVEL` 环境变量临时开启 `DEBUG` 排查
 - 🔄 **多模型热切换**：DeepSeek / GLM / LongCat 等任意 OpenAI 兼容端点，改配置即生效
 - 🧩 **Operit 模型库联动**：传 `model_config_id` 自动同步对应 API Key
 
@@ -159,6 +160,36 @@ if (hit && hit.apiKey) {
 **原因**：包内守护逻辑 `ensureFeishuServiceStarted` 会在检测到服务停止时自动重启；此外网关进程运行在 proot 容器内，**宿主侧 `ps`/`kill` 看不到其真实 PID**，无法从外部强杀。
 
 **规避方式**：不要依赖 stop，直接用 `feishu_bot_service_start(restart: true)` 显式重启。
+
+---
+
+## 🩹 已修复（Fixed）
+
+### v0.1.1
+
+#### 1. ACK 帧 `SeqID` 恒为 0，导致用户被重复消息刷屏 🔴→✅（核心修复）
+
+**现象**：用户发一条消息，机器人反复推送同一问答，跨多个时段不停重复（如几十秒重投一次，持续数十分钟）。
+
+**根因**：飞书长连接协议要求 ACK 帧的 `SeqID` 与请求帧一一对应。原实现在三处 `send_frame` 调用点（ping / 首帧 ACK / 完成 ACK）**均未传 `seq_id`**，导致 ACK 的 `SeqID` 恒为 0，飞书判定事件未确认，按递增间隔持续重投。
+
+**修复**：三处 `send_frame` 补齐 `seq_id=seq_id, log_id=log_id`，ACK 回填请求帧的真实 `SeqID`。
+
+**实证**：修复后实测多条消息，`frame.SeqID` 均为非 0 且 ACK 正确回填（如 `1524829487 / 1524981587 / 1525211493`），`event_frames` 正常增长后稳定，**每条消息只被处理一次、只回复一次**。
+
+#### 2. 去重表进程重启后丢失 🟡→✅
+
+**现象**：去重表仅在内存中，进程重启（或网关 recycling）后清零，历史重投无法被拦截。
+
+**修复**：新增 `_load_dedup()` / `_save_dedup()`，启动时从 `feishu_gateway.dedup.json` 载入，记录新事件后原子落盘（写 `.tmp` 再 `os.replace`）；容错缺失文件与损坏 JSON，`max_processed_events=500` LRU 淘汰最旧。
+
+**实证**：进程重启日志出现 `[Dedup] 已从磁盘载入 N 条历史去重记录`，并在真实环境中成功拦截了一次飞书重投（`[Dedup] 重复事件已忽略`）。
+
+#### 3. 超长诊断日志刷屏 🟡→✅
+
+**现象**：`[ACK-DIAG] event frame headers={...}` 单行超长（含完整帧头），在 INFO 级别下大量输出。
+
+**修复**：该行由 `log.info` 降为 `log.debug`；日志级别由写死的 `DEBUG` 改为**默认 `INFO`**，可通过 `--log-level` 或 `FEISHU_LOG_LEVEL` 覆盖。
 
 ---
 

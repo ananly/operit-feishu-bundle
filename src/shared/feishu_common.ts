@@ -1,4 +1,4 @@
-export const PACKAGE_VERSION = "0.1.0";
+export const PACKAGE_VERSION = "0.1.1";
 export const FEISHU_TOOLPKG_ID = "com.operit.feishu_bundle";
 export const CONFIG_FILE_NAME = "feishu_config.json";
 export const LOG_FILE_NAME = "feishu_service.log";
