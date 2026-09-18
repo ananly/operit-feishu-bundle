@@ -1,0 +1,17 @@
+# 凭据 / 运行时配置（严禁提交）
+feishu_config.json
+feishu_service_state.json
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 备份文件
+*.bak
+*.bak.*
+.WRONG.bak.*
+
+# 系统
+.DS_Store
+Thumbs.db
